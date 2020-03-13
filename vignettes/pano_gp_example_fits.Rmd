@@ -2,7 +2,7 @@
 title: "Panobinostat GP example fits"
 author: "Nils Kurzawa"
 date: "3/13/2020"
-output: html_document
+output: pdf_document
 ---
 
 ```{r setup, include=FALSE}
@@ -142,6 +142,13 @@ ggplot(sum_df, aes(log2(rssDiff), -log10(p_val))) +
     theme_bw()
 ```
 
+But the p-value histogramm does not look good...
+
+```{r}
+ggplot(sum_df, aes(p_val)) +
+    geom_histogram(boundary = 0) +
+    theme_bw()
+```
 
 ```{r}
 sessionInfo()
