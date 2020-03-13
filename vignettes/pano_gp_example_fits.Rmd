@@ -1,0 +1,150 @@
+---
+title: "Panobinostat GP example fits"
+author: "Nils Kurzawa"
+date: "3/13/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load required libraries
+```{r}
+library(tidyverse)
+library(NPARC)
+library(GP4TPP)
+```
+
+```{r}
+reRun <- FALSE
+```
+
+
+Load data 
+```{r}
+panoTppData <- readRDS("../data/tppData_preprocessed.Rds") %>% 
+    filter(dataset == "Panobinostat")
+```
+
+Let's have a look at HDAC1 in isolation, to check how GP curves look like:
+```{r}
+hdac1_treat_df <- filter(panoTppData, uniqueID == "HDAC1", 
+                   compoundConcentration == 1) %>% 
+    dplyr::select(x = temperature,
+                  y = relAbundance)
+
+hdac1_treat_df
+```
+
+Fit the melting profile of HDAC1 in the treatment condition
+```{r}
+hdac1GpFit <- fitGP(in_df = hdac1_treat_df, 
+                    x_range = seq(37, 67, 0.5), 
+                    n_samples = 100,
+                    l = 8)
+
+hdac1GpFit$plot
+```
+
+Let's also look at the vehicle condition
+```{r}
+hdac1_veh_df <- filter(panoTppData, uniqueID == "HDAC1", 
+                       compoundConcentration == 0) %>% 
+    dplyr::select(x = temperature,
+                  y = relAbundance)
+
+hdac1_veh_df
+```
+
+```{r}
+hdac1VehGpFit <- fitGP(in_df = hdac1_veh_df, 
+                       x_range = seq(37, 67, 0.5), 
+                       n_samples = 100,
+                       l = 8)
+
+hdac1VehGpFit$plot
+```
+
+Reformat data frame to be compatible with function
+```{r}
+panoFitDf <- panoTppData %>% 
+    dplyr::select(gene_name = uniqueID,
+                  temperature,
+                  rel_value = relAbundance,
+                  var = compoundConcentration)
+
+panoFitDf
+```
+
+
+```{r eval=reRun}
+h0_stats <- fitH0ModelTppGP(
+  in_df = panoFitDf,
+  n_samples = 100,
+  l = 8
+)
+```
+
+
+
+```{r eval=reRun}
+h1_stats <- fitH1ModelTppGP(
+  in_df = panoFitDf,
+  n_samples = 100,
+  l = 8
+)
+```
+
+```{r eval=!reRun}
+load("../data/pano_eval_models.RData")
+```
+
+
+```{r}
+sum_df <- left_join(
+  h0_stats, h1_stats,
+  by = c("gene_name")) %>%
+  mutate(rssH0_rssH1 = rssH0 - rssH1) 
+
+head(sum_df %>% mutate(F_stat = rssH0_rssH1/rssH1) %>% arrange(desc(F_stat)))
+```
+
+```{r}
+ggplot(sum_df, aes(rssH0_rssH1/rssH1)) +
+    geom_histogram(bins = 200) +
+    xlab('F') +
+    theme_bw()
+```
+
+```{r}
+distr_pars = NPARC:::estimate_df(rss1 = sum_df$rssH1, rssDiff = sum_df$rssH0_rssH1)
+sum_df$d1 <- distr_pars$d1
+sum_df$d2 <- distr_pars$d2
+sum_df$s0_sq = distr_pars$s0_sq
+sum_df$rssDiff <- sum_df$rssH0_rssH1/sum_df$s0_sq
+sum_df$rss1 = sum_df$rssH1/sum_df$s0_sq
+
+sum_df <- sum_df %>% 
+  mutate(F_statistic = rssDiff / rss1 * (d2 / d1)) %>%
+  mutate(p_val = 1 - pf(F_statistic, df1 = d1, df2 = d2)) %>%
+  mutate(p_adj = p.adjust(p_val, method = "BH"))
+
+sum_df %>% filter(p_adj < 0.1)
+```
+
+```{r}
+ggplot(sum_df, aes(log2(rssDiff), -log10(p_val))) +
+    geom_point(color = "gray", alpha = 0.5) +
+    geom_point(data = filter(sum_df, p_adj < 0.1)) +
+    ggrepel::geom_text_repel(aes(label = gene_name),
+                             data = filter(sum_df, p_adj < 0.1)) +
+    theme_bw()
+```
+
+
+```{r}
+sessionInfo()
+```
+
+
