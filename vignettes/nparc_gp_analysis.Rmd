@@ -1,0 +1,229 @@
+---
+title: "phosphoTPP NPARC GP analysis"
+author: "Nils Kurzawa"
+date: "3/13/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(NPARC)
+```
+
+```{r}
+calcSigma <- function(X1,X2,l=12) {
+  Sigma <- matrix(rep(0, length(X1)*length(X2)), nrow=length(X1))
+  for (i in 1:nrow(Sigma)) {
+    for (j in 1:ncol(Sigma)) {
+      Sigma[i,j] <- exp(-0.5*(abs(X1[i]-X2[j])/l)^2)
+    }
+  }
+  return(Sigma)
+}
+
+fitGP <- function(in_df, x_range, n_samples, l = 12){
+  x_range <- sort(unique(c(x_range, in_df$x)))
+
+  mean_df <- in_df %>%
+    dplyr::group_by(x) %>%
+    dplyr::summarise(y = mean(y, na.rm = TRUE)) %>%
+    dplyr::ungroup()
+  sigma <- calcSigma(x_range,x_range, l = l)
+  # Calculate the covariance matrices
+  # using the same temperature_range values as above
+  k_xx <- calcSigma(mean_df$x, mean_df$x, l = l)
+  k_xxs <- calcSigma(mean_df$x, x_range, l = l)
+  k_xsx <- calcSigma(x_range,mean_df$x, l = l)
+  k_xsxs <- calcSigma(x_range, x_range, l = l)
+  # get the standard deviation of the noise
+  sigma_n <- sapply(sort(unique(in_df$x)), function(xi){
+    sd(filter(in_df, x == xi)$y, na.rm = TRUE)
+  })
+  # Recalculate the mean and covariance functions
+  f_star_bar <- k_xsx %*% solve(k_xx + sigma_n^2*diag(1, ncol(k_xx))) %*% mean_df$y
+  cov_f_star <- k_xsxs - k_xsx %*% solve(k_xx + sigma_n^2*diag(1, ncol(k_xx))) %*% k_xxs
+
+  # Recalulate the sample functions
+  values <- matrix(rep(0,length(x_range) * n_samples), ncol = n_samples)
+  for (i in seq_len(n_samples)) {
+    values[,i] <- mvrnorm(1, f_star_bar, cov_f_star)
+  }
+  values <- cbind(x = x_range, as.data.frame(values))
+  values <- gather(values, key, value, -x)
+
+  mean_vals <- values %>%
+    dplyr::group_by(x) %>%
+    dplyr::summarise(value = mean(value)) %>%
+    dplyr::ungroup()
+
+  gg <- ggplot(values,aes(x = x,y = value)) +
+         geom_line(aes(group = key), colour="grey80", alpha = 0.25) +
+         geom_line(colour="grey20",data = mean_vals) +
+         geom_errorbar(data = mean_df, aes(x = x, y = NULL,
+                                         ymin = y - 2 * sigma_n,
+                                         ymax = y + 2 * sigma_n), width=0.2) +
+         geom_point(data = mean_df,aes(x = x ,y = y)) +
+         theme_bw() +
+         xlab("input, x")
+
+  residuals <- (mean_vals %>%
+    left_join(in_df, by = "x") %>%
+    mutate(res = value - y))$res
+
+  return(list("mean values" = mean_vals,
+              "full values" = values,
+              "plot" = gg,
+              "residuals" = residuals))
+}
+
+evalGP <- function(gp_model, in_df, model_type = "H0"){
+  out_tab <- tibble(
+    nObs = nrow(in_df),
+    rss = sum(gp_model$residuals^2, na.rm = TRUE)
+  )
+  colnames(out_tab) <- paste0(colnames(out_tab), model_type)
+  return(out_tab)
+}
+
+fitH0ModelTppPhGP <- function(in_df,
+                              x_range = seq(37, 67, len = 50),
+                              n_samples = 500, l = 5){
+ out_df <- in_df %>%
+   mutate(x = temperature, y = rel_value) %>% 
+    group_by(gene_name, mod_sequence) %>%
+    do({
+      h0_model = fitGP(., x_range = x_range, 
+                       n_samples = n_samples, l = l)
+      evalGP(h0_model, ., model_type = "H0")
+    }) %>%
+    ungroup
+
+  return(out_df)
+}
+
+fitH1ModelTppPhGP <- function(in_df,
+                              x_range = seq(37, 67, len = 50),
+                              n_samples = 500, l = 5){
+  out_df <- in_df %>%
+    mutate(x = temperature, y = rel_value) %>% 
+    group_by(gene_name, mod_sequence, var) %>%
+    do({
+      #print(.$gene_name[1])
+      h1_model = fitGP(., x_range = x_range, 
+                       n_samples = n_samples, l = l)
+      evalGP(h1_model, ., model_type = "H1")
+    }) %>%
+    group_by(gene_name, mod_sequence) %>% 
+    summarize(nObsH1 = sum(nObsH1),
+              rssH1 = sum(rssH1)) %>% 
+    ungroup
+
+  return(out_df)
+}
+
+```
+
+
+```{r}
+nbf_peptide_tab_filtered <- read_csv("phosphoTPP-supplementary_data2-supplementary_table_non-modified_peptide_fold_changes.csv") %>% 
+  gather(channel, rel_value, matches("rel_fc"))
+phospho_peptide_tab_filtered <- read_csv("phosphoTPP-supplementary_data1-supplementary_table_phospho_peptide_fold_changes.csv")
+```
+
+```{r}
+nbf_peptide_tab_filtered <- nbf_peptide_tab_filtered %>% 
+  gather(channel, rel_value, matches("rel_fc")) %>% 
+  mutate(temperature = as.numeric(gsub("rel_fc_[^_]+_[1-9]_", "", channel)),
+         replicate = as.factor(gsub("_[0-9]{2}.*", "", gsub("rel_fc_[^_]+_", "", channel))))
+
+phospho_peptide_tab_filtered <- phospho_peptide_tab_filtered %>% 
+  gather(channel, rel_value, matches("rel_fc")) %>% 
+  mutate(temperature = as.numeric(gsub("rel_fc_[^_]+_[1-9]_", "", channel)),
+         replicate = as.factor(gsub("_[0-9]{2}.*", "", gsub("rel_fc_[^_]+_", "", channel))))
+```
+
+
+
+```{r}
+combo_tab <- bind_rows(
+  phospho_peptide_tab_filtered %>% dplyr::select(
+    protein_id, gene_name, sequence, mod_sequence, replicate, temperature, rel_value
+  ) %>% mutate(var = "phosphopeptide"),
+  nbf_peptide_tab_filtered %>% ungroup() %>% 
+    mutate(mod_sequence = NA) %>% 
+    dplyr::select(
+      protein_id, gene_name, sequence, mod_sequence, replicate, temperature, rel_value
+    ) %>% 
+    mutate(var = "all unmodified")
+)
+```
+
+```{r}
+nbf_protein_tab <-  nbf_peptide_tab_filtered %>% 
+  ungroup %>% 
+  group_by(protein_id, gene_name, replicate, temperature) %>% 
+  summarize(rel_value = median(rel_value, na.rm = TRUE)) %>% 
+  ungroup %>% 
+  filter(!is.na(rel_value))
+
+combo_tab_per_peptide <- bind_rows(lapply(unique(phospho_peptide_tab_filtered$mod_sequence), function(mod_seq){
+  temp_tab <- filter(phospho_peptide_tab_filtered, mod_sequence == mod_seq) %>% 
+    dplyr::select(protein_id, gene_name, sequence, mod_sequence, 
+                  replicate, temperature, rel_value) %>% 
+    mutate(var = "phosphopeptide")
+  temp_prot_tab <- filter(nbf_protein_tab, gene_name == temp_tab$gene_name[1]) %>% 
+    mutate(mod_sequence = temp_tab$mod_sequence[1],
+           sequence = gsub("_", "", gsub("p", "", temp_tab$mod_sequence[1]))) %>% 
+    dplyr::select(
+      protein_id, gene_name, sequence, mod_sequence, replicate, temperature, rel_value
+    ) %>% 
+    mutate(var = "all unmodified")
+  return(bind_rows(temp_tab, temp_prot_tab))
+}))
+
+combo_tab_per_peptide <- combo_tab_per_peptide %>% 
+  na.omit() %>% 
+  group_by(gene_name, mod_sequence, var) %>% 
+  filter(length(unique(replicate)) > 1) %>% 
+  group_by(gene_name, mod_sequence) %>% 
+  filter(length(unique(var)) > 1) %>% 
+  ungroup 
+```
+
+
+```{r}
+h0_stats <- fitH0ModelTppPhGP(
+  in_df = combo_tab_per_peptide
+)
+  
+h1_stats <- fitH1ModelTppPhGP(
+  in_df = combo_tab_per_peptide
+)
+```
+
+```{r}
+sum_df <- left_join(
+  h0_stats, h1_stats,
+  by = c("gene_name", "mod_sequence")) %>%
+  mutate(rssH0_rssH1 = rssH0 - rssH1) 
+
+sum_df <- left_join(h1_stats, h0_stats %>% 
+                      dplyr::select(gene_name, mod_sequence, rssH0)) %>% 
+  mutate(rssH0_rssH1 = rssH0 - rssH1)
+
+distr_pars = NPARC:::estimate_df(rss1 = sum_df$rssH1, rssDiff = sum_df$rssH0_rssH1)
+sum_df$d1 <- distr_pars$d1
+sum_df$d2 <- distr_pars$d2
+sum_df$s0_sq = distr_pars$s0_sq
+sum_df$rssDiff <- sum_df$rssH0_rssH1/sum_df$s0_sq
+sum_df$rss1 = sum_df$rssH1/sum_df$s0_sq
+sum_df <- sum_df %>% 
+  mutate(F_statistic = rssDiff / rss1 * (d2 / d1)) %>%
+  mutate(p_val = 1 - pf(F_statistic, df1 = d1, df2 = d2)) %>%
+  mutate(p_adj = p.adjust(p_val, method = "BH"))
+  
+```
